@@ -1,0 +1,4 @@
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.1,5,200,30,200,0.0005864567356184125,0,1e-05,ANN0.0005864567356184125
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.1,5,200,30,200,0.0005275781149975955,0,1e-05,ANN0.0005275781149975955
