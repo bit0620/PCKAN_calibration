@@ -18,7 +18,7 @@ import torch
 
 
 def calibration_nn(option_params, real_prices, bounds, n_len, save_dir, net_name):
-    model = torch.load(f'../neural_network/train_res/{save_dir}/PCKAN0.00017504163937849033.pt')
+    model = torch.load(f'../neural_network/train_lee/{save_dir}/model_recovered_20260409_040524.pt', map_location=torch.device('cpu'))
 
     calibration_params = []
 

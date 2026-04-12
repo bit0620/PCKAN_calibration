@@ -71,18 +71,23 @@ class Cheby_KAN(nn.Module):
         self.layers.append(Cheby2KANLayer(self.middle_dim, self.output_dim, self.degrees[-1]))
 
     def forward(self, x):
-        identity = x  # 保存初始输入用于最后的残差连接
-        
+        # 2. 遍历模型的所有层：i=层索引，layer=当前层
         for i, layer in enumerate(self.layers):
+            # 3. 判断：当前层是不是【切比雪夫二阶KAN层】（自定义核心层）
             if isinstance(layer, Cheby2KANLayer):
-                # 中间层添加残差连接
+                # 4. 核心：满足3个条件 → 给KAN层加【残差连接】
+                # 残差连接条件：中间层 + KAN层 + 输入输出维度一致
                 if i != 0 and i != len(self.layers) - 1 and x.size(1) == layer.outdim:
+                    # 残差计算：层输出 + 层输入（Residual Connection）
                     x = layer(x) + x
+                # 不满足条件 → KAN层正常计算，不加残差
                 else:
                     x = layer(x)
+            # 5. 非KAN层（如归一化、激活、线性层）：直接正常计算
             else:
                 x = layer(x)
         
+        # 6. 返回最终前向传播结果
         return x
 
 

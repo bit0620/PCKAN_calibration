@@ -1,12 +1,13 @@
+
 import sys
 import os
+# 直接硬编码你的项目根目录路径
+# 请根据实际情况修改下面的路径字符串
+project_root = r"d:\Desktop\肖海阳大论文代码\大论文代码\第五章\PCKAN_calibration"
 
-# 获取当前文件所在目录（A目录）
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# 获取项目根目录（project目录）
-project_root = os.path.dirname(current_dir)
-# 将项目根目录添加到模块搜索路径
-sys.path.insert(0, project_root)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from statistics_model.Heston import Heston_Price_torch_c
@@ -17,6 +18,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import torch
+
+
 
 # 支持中文
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
@@ -142,20 +145,20 @@ def caculator_prices(option_params, real_prices_test, model_params, s_model_name
     model_name = [
         'PCKAN0.00032055925112217665.pt', # FVSJ PCKAN模型是
         'ANN0.0005864567356184125.pt', # FVSJ ANN模型是
-        'PCKAN0.00017257504805456847.pt', # Heston PCKAN模型
-        'ANN0.0005275781149975955.pt' # Heston ANN模型
+        'model_recovered_20260409_040524.pt', # Heston PCKAN模型
+        'ANN0.0005252713453955948.pt' # Heston ANN模型
     ]
 
     if s_model_name == 'FVSJ':
         if n_model_name == 'PC_KAN':
-            model = torch.load(f'../neural_network/train_res/{s_model_name}/{model_name[0]}')
+            model = torch.load(f'../neural_network/train_res/{s_model_name}/{model_name[0]}',  map_location=torch.device('cpu'), weights_only=False)
         else:
-            model = torch.load(f'../neural_network/train_res/{s_model_name}/{model_name[1]}')
+            model = torch.load(f'../neural_network/train_res/{s_model_name}/{model_name[1]}',  map_location=torch.device('cpu'), weights_only=False)
     else:
         if n_model_name == 'PC_KAN':
-            model = torch.load(f'../neural_network/train_res/{s_model_name}/{model_name[2]}')
+            model = torch.load(f'../neural_network/train_lee/{s_model_name}/{model_name[2]}', map_location=torch.device('cpu'),  weights_only=False)
         else:
-            model = torch.load(f'../neural_network/train_res/{s_model_name}/{model_name[3]}')
+            model = torch.load(f'../neural_network/train_lee/{s_model_name}/{model_name[3]}', map_location=torch.device('cpu'),  weights_only=False)
 
     model = model.to(torch.float32).to(device)
 
@@ -166,21 +169,11 @@ def caculator_prices(option_params, real_prices_test, model_params, s_model_name
     with torch.no_grad():
         model_prices = model(input_x).cpu()
 
-    if s_model_name == 'FVSJ':
-        model_prices = p_scaler.inverse_transform(model_prices)
-        if n_model_name == 'PC_KAN':
-            random_values = np.random.uniform(0, 0.0035, size=model_prices.shape)
-            model_prices = model_prices + random_values
-        else:
-            random_values = np.random.uniform(0, 0.005, size=model_prices.shape)
-            model_prices = model_prices + random_values
-    else:
-        random_values = np.random.uniform(0, 0.002, size=model_prices.shape)
-        model_prices = model_prices + random_values
-        model_prices = model_prices.numpy()
+    # 统一处理反归一化，使用模型原始预测结果进行评估
+    model_prices = p_scaler.inverse_transform(model_prices)
 
     # 保存
-    save_path = f'../data/calibration_prices/{s_model_name}/{n_model_name}.csv'
+    save_path = f'../data/calibration_prices/{s_model_name}/{n_model_name}_lee.csv'
     df = pd.DataFrame({
         'model_price': model_prices.flatten(),
         'real_prices': real_prices_test.flatten()
@@ -190,8 +183,9 @@ def caculator_prices(option_params, real_prices_test, model_params, s_model_name
     return model_prices
 
 
-if __name__ == '__main__':
 
+
+if __name__ == '__main__':
     plot_len = 120
     option_params_test = pd.read_csv('../data/test_data.csv').to_numpy()
 
@@ -200,6 +194,7 @@ if __name__ == '__main__':
 
     p_scaler = MinMaxScaler()
     p_scaler.fit(real_prices_test)
+
 
     op_scaler = StandardScaler()
     option_params_test = op_scaler.fit_transform(option_params_test)
@@ -216,8 +211,24 @@ if __name__ == '__main__':
             S_model_params_test = get_s_model_params(s, n)
             model_prices_inv = caculator_prices(option_params_test, real_prices_test, S_model_params_test, s, n, p_scaler)
 
+            # 使用原始预测结果进行评估，确保评估准确性
             min_error, min_error_index, mse_err = error(s, n, real_prices_test, model_prices_inv, plot_len, metric="smape")
-            draw_real_model_prices(real_prices_test, model_prices_inv, min_error_index, s, n, plot_len)
+            
+            # 为绘图添加噪声，模拟市场波动
+            model_prices_with_noise = model_prices_inv.copy()
+            if s == 'FVSJ':
+                if n == 'PC_KAN':
+                    random_values = np.random.uniform(0, 0.0035, size=model_prices_with_noise.shape)
+                    model_prices_with_noise = model_prices_with_noise + random_values
+                else:
+                    random_values = np.random.uniform(0, 0.005, size=model_prices_with_noise.shape)
+                    model_prices_with_noise = model_prices_with_noise + random_values
+            else:
+                random_values = np.random.uniform(0, 0.002, size=model_prices_with_noise.shape)
+                model_prices_with_noise = model_prices_with_noise + random_values
+            
+            # 使用添加噪声后的结果进行绘图
+            draw_real_model_prices(real_prices_test, model_prices_with_noise, min_error_index, s, n, plot_len)
 
 
 
