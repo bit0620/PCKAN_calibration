@@ -227,8 +227,8 @@ if __name__ == '__main__':
                 random_values = np.random.uniform(0, 0.002, size=model_prices_with_noise.shape)
                 model_prices_with_noise = model_prices_with_noise + random_values
             
-            # 使用添加噪声后的结果进行绘图
-            draw_real_model_prices(real_prices_test, model_prices_with_noise, min_error_index, s, n, plot_len)
+            # 使用添加噪声后的结果进行绘图，并显示原始预测
+            draw_real_model_prices(real_prices_test, model_prices_with_noise, min_error_index, s, n, plot_len, show_noise=True, model_prices_original=model_prices_inv)
 
 
 
