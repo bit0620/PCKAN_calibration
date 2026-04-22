@@ -66,17 +66,17 @@ def generate_param_combinations_csv(output_path='../data/train/train_params.csv'
     
     # 定义参数网格（按论文要求调整）
     param_grid = {
-        'batch_size': [1024],  # 论文推荐：从小批量开始验证，逐步增大
+        'batch_size': [8192],  # 论文推荐：从小批量开始验证，逐步增大
         'num_workers': [16],  # 数据加载进程数
         'num_epochs': [300],  # 论文推荐：固定大迭代次数
         'lr_KAN': [5e-2, 3e-2, 1e-2 ],  # 学习率范围：配合轮式学习率在1e-4到5e-3之间变化
-        'num_layers_KAN': [4, 3, 2],  # 网络层数
-        'middle_dim_kan': [128, 32, 64, 96 ],  # 中间维度
-        'dropout_p': [0.1, 0.2, 0.0],  # Dropout概率
+        'num_layers_KAN': [2, 3, 4],  # 网络层数
+        'middle_dim_kan': [32, 64, 96, 128],  # 中间维度
+        'dropout_p': [0.0, 0.1, 0.2],  # Dropout概率
         'weight_decay': [1e-6, 5e-6, 1e-5],  # 权重衰减（L2正则化）
         'output_size': [1],
         's_model_name': ['Heston'],
-        'degrees': [[3, 5, 5, 5, 5]], # 切比雪夫多项式阶数
+        'degrees': [[3, 5, 5, 5, 5], [3, 5, 5, 5, 6], [3, 4, 5, 5, 6], [4, 5, 5, 5, 6]], # 切比雪夫多项式阶数
         # ANN参数（即使不使用，也需要定义以避免错误）
         'lr_ANN': [1e-4],
         'middle_dim': [32],
