@@ -43,26 +43,51 @@ def load_data(s_model_name, batch_size=32, num_workers=4, device='cuda', random_
     y_train = y_scaler.fit_transform(y_train)
     y_test = y_scaler.transform(y_test)
     
-    # 转换为PyTorch张量并转移到设备
-    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
-    X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-    y_test_t = torch.tensor(y_test, dtype=torch.float32).to(device)
-    pinn_data_t = torch.tensor(pinn_data, dtype=torch.float32).to(device)
+    # 修改这部分：不要将数据直接移动到CUDA
+    X_train_t = torch.tensor(X_train, dtype=torch.float32)  # 移除 .to(device)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32)
+    X_test_t = torch.tensor(X_test, dtype=torch.float32)
+    y_test_t = torch.tensor(y_test, dtype=torch.float32)
+    pinn_data_t = torch.tensor(pinn_data, dtype=torch.float32)
     
     # 创建数据集
     train_dataset = TensorDataset(X_train_t, y_train_t)
     test_dataset = TensorDataset(X_test_t, y_test_t)
     pinn_dataset = TensorDataset(pinn_data_t)
     
-    # 创建数据加载器
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False,num_workers=num_workers)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    pinn_loader = DataLoader(pinn_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    # 修改DataLoader参数
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,  # 保持pin_memory以加速CPU到GPU的传输
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=4 if num_workers > 0 else None
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=4 if num_workers > 0 else None
+    )
+    
+    pinn_loader = DataLoader(
+        pinn_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=4 if num_workers > 0 else None
+    )
     
     input_size = X_train.shape[1]
-    
-    return train_loader, test_loader, pinn_loader, input_size 
+    return train_loader, test_loader, pinn_loader, input_size
 
 
 def black_scholes_price(cp, spot, strike, maturity, vol, r):
@@ -141,12 +166,91 @@ def loss_function(Y_hat, Y, params, lambda_weight):
     # 1. 数据损失
     loss_pred = loss_fn(Y_hat, Y)
     
-    # 2. 物理损失
-    price_pde = BS_PDE(params)
+    # 2. 物理损失 - 使用预测的隐含波动率计算PDE残差
+    # 从params中提取参数
+    iv = params[:, 0].view(-1, 1)  # 隐含波动率
+    cp = params[:, 1].view(-1, 1)  # 期权类型
+    maturity = params[:, 2].view(-1, 1)  # 到期时间
+    strike = params[:, 3].view(-1, 1)  # 行权价
+    spot = params[:, 4].view(-1, 1)  # 标的资产价格
+    r = params[:, 5].view(-1, 1)  # 无风险利率
+
+    # 使用预测的隐含波动率计算期权价格
+    # 注意：这里使用模型预测的Y_hat作为波动率
+    option_price = black_scholes_price(cp, spot, strike, maturity, Y_hat, r)
+
+    # 计算期权价格的PDE残差
+    # 使用解析导数公式计算PDE残差
+    # 在Black-Scholes模型中，期权价格满足PDE：dc/dt + r*c - r*S*dc/dS - 0.5*sigma^2*S^2*d^2c/dS^2 = 0
+    # 但是，由于我们使用的是Black-Scholes公式，理论上这个残差应该为0
+    # 所以，我们可以使用解析导数公式来计算PDE残差
+
+    # 计算d1和d2
+    d1 = (torch.log(spot / strike) + (r + 0.5 * Y_hat**2) * maturity) / (Y_hat * torch.sqrt(maturity))
+    d2 = d1 - Y_hat * torch.sqrt(maturity)
+
+    # 计算标准正态分布的PDF和CDF
+    pdf_d1 = torch.exp(-0.5 * d1**2) / torch.sqrt(2 * torch.tensor(3.14159, device=spot.device))
+    cdf_d1 = 0.5 * (1 + torch.erf(d1 / torch.sqrt(torch.tensor(2.0, device=spot.device))))
+    cdf_d2 = 0.5 * (1 + torch.erf(d2 / torch.sqrt(torch.tensor(2.0, device=spot.device))))
+
+    # 计算看涨和看跌期权价格
+    call_price = spot * cdf_d1 - strike * torch.exp(-r * maturity) * cdf_d2
+    put_price = strike * torch.exp(-r * maturity) * (1 - cdf_d2) - spot * (1 - cdf_d1)
+
+    # 根据cp标志选择看涨或看跌价格
+    option_price_bs = torch.where(cp == 1, call_price, put_price)
+
+    # 计算PDE残差
+    # 对于Black-Scholes公式，理论上残差应该为0
+    # 但由于我们使用的是预测的隐含波动率，残差可能不为0
+    # 我们可以使用数值差分来计算导数
+    epsilon = 1e-5
+
+    # 计算关于maturity的导数
+    maturity_plus = maturity + epsilon
+    option_price_plus = black_scholes_price(cp, spot, strike, maturity_plus, Y_hat, r)
+    c_t = (option_price_plus - option_price) / epsilon
+
+    # 计算关于spot的导数
+    spot_plus = spot + epsilon
+    option_price_plus = black_scholes_price(cp, spot_plus, strike, maturity, Y_hat, r)
+    c_s = (option_price_plus - option_price) / epsilon
+
+    # 计算关于spot的二阶导数
+    spot_minus = spot - epsilon
+    option_price_minus = black_scholes_price(cp, spot_minus, strike, maturity, Y_hat, r)
+    c_ss = (option_price_plus - 2 * option_price + option_price_minus) / (epsilon**2)
+
+    # 计算PDE残差
+    term1 = c_t
+    term2 = r*option_price
+    term3 = r*spot*c_s
+    term4 = torch.square(Y_hat*spot)*c_ss*0.5
+    f = term1 + term2 - term3 - term4
+
+    # 对PDE残差进行归一化，使得各项的量级更加平衡
+    # 除以spot^2，使得各项的量级更加平衡
+    f_normalized = f / (torch.square(spot) + 1e-8)  # 加上小常数避免除以0
+
+    # 打印调试信息（只在第一个batch打印）
+    if torch.rand(1).item() < 0.01:  # 约1%的概率打印
+        print(f"PDE残差各部分量级:")
+        print(f"  c_t: {torch.mean(torch.abs(term1)).item():.6e}")
+        print(f"  r*option_price: {torch.mean(torch.abs(term2)).item():.6e}")
+        print(f"  r*spot*c_s: {torch.mean(torch.abs(term3)).item():.6e}")
+        print(f"  0.5*(Y_hat*spot)^2*c_ss: {torch.mean(torch.abs(term4)).item():.6e}")
+        print(f"  PDE残差f: {torch.mean(torch.abs(f)).item():.6e}")
+        print(f"  归一化PDE残差: {torch.mean(torch.abs(f_normalized)).item():.6e}")
+        print(f"  Y_hat范围: [{torch.min(Y_hat).item():.6e}, {torch.max(Y_hat).item():.6e}]")
+        print(f"  option_price范围: [{torch.min(option_price).item():.6e}, {torch.max(option_price).item():.6e}]")
+
     # 处理可能的 NaN 值
-    price_pde = torch.where(torch.isnan(price_pde), torch.zeros_like(price_pde), price_pde)
-    pi_loss_target = torch.zeros_like(price_pde)
-    loss_pi = loss_fn(price_pde, pi_loss_target)
+    f_normalized = torch.where(torch.isnan(f_normalized), torch.zeros_like(f_normalized), f_normalized)
+
+    # PDE Loss是残差与0的MSE
+    pi_loss_target = torch.zeros_like(f_normalized)
+    loss_pi = loss_fn(f_normalized, pi_loss_target)
     
     return loss_pred, loss_pi
 

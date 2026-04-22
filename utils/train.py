@@ -1,10 +1,7 @@
 import sys
 import os
-# 获取当前文件所在目录（A目录）
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# 获取项目根目录（project目录）
-project_root = os.path.dirname(current_dir)
-# 将项目根目录添加到模块搜索路径
+# 👇 只加这两行，下面 from neural_network... 一行不动
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from neural_network.FNN import nn_impvol
@@ -28,8 +25,8 @@ plt.rcParams['axes.unicode_minus'] = False # 用来正常显示负号
 
 
 def lr_schedule(n):
-    a, b = 1e-4, 1e-2
-    n1, n2, n3 = 0, 25, 150
+    a, b = 1e-4, 1e-2  # 最小学习率1e-4，最大学习率1e-2（提高最大学习率）
+    n1, n2, n3 = 0, 50, 200  # 0-50轮上升，50-200轮下降，200轮后保持最小值（大幅延长高学习率阶段）
 
     if n <= n2:
         return (a - b)/(n1 - n2) * n - (a*n2 - b*n1) / (n1 - n2)
@@ -58,20 +55,20 @@ def generate_param_combinations_csv(output_path='../data/train/train_params.csv'
     
     # 定义参数网格
     param_grid = {
-        'batch_size': [32],
-        'num_workers': [0],
-        'num_epochs': [200],
+        'batch_size': [131072],
+        'num_workers': [16],  # 改为12，开启多进程数据加载（CPU核心数的1.5-2倍）
+        'num_epochs': [300],  # 增加训练轮数到300，给模型更多收敛时间
         'lr_ANN': [0.1],
         'middle_dim': [30],
         'num_layers_ANN': [5],
-        'lr_KAN': [0.001, 0.01],  # 学习率
-        'num_layers_KAN': [3, 4],  # 层数
-        'middle_dim_kan': [64, 128],  # 中间维度
-        'dropout_p': [0.1, 0.2],  # Dropout
-        'weight_decay': [1e-05],  # 权重衰减
+        'lr_KAN': [0.005, 0.008, 0.01],  # 学习率：提高学习率范围，配合轮式学习率在1e-4到5e-3之间变化
+        'num_layers_KAN': [2, 3, 4],  # 层数
+        'middle_dim_kan': [64, 96, 128],  # 中间维度：增加96作为中间选项
+        'dropout_p': [0.1, 0.15, 0.2],  # Dropout：增加0.15作为中间选项
+        'weight_decay': [5e-6, 1e-5],  # 权重衰减：增加更小的正则化选项
         'output_size': [1],
         's_model_name': ['Heston'],
-        'degrees': [[3, 5, 5, 5, 5], [3, 5, 5, 5, 6]]  # 添加degrees参数
+        'degrees': [[3, 5, 5, 5, 5], [3, 5, 5, 5, 6], [3, 4, 5, 5, 6]]  # 增加更多degrees组合
     }
 
     
@@ -119,20 +116,9 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
     """
     训练模型并测试，包含早停机制和自适应权重
     
-    参数:
-        model: 要训练的模型
-        train_iter: 训练数据迭代器
-        test_iter: 测试数据迭代器
-        num_epochs: 最大训练轮数
-        learning_rate: 学习率
-        weight_decay: 权重衰减
-        device: 训练设备
-        net_name: 网络名称
-        pinn_params: PINN参数
-        save_dir: 保存目录
-        lambda_weight: 初始损失权重参考(自适应模式下主要用于初始化或忽略)
-        patience: 早停耐心值
-        min_delta: 被认为是改善的最小变化量
+    注意：本实现采用三个自适应权重（数据损失 w_data、PDE 损失 w_pde 和边界损失 w_boundary），
+          权重通过 softmax 形式学习，强制 w_data + w_pde + w_boundary = 1。
+          所有损失项都使用相对形式，并进行适当的归一化处理。
     """
     import torch.optim as optim
     import torch.nn as nn
@@ -140,21 +126,22 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
     from tqdm import tqdm
     import matplotlib.pyplot as plt
     import os
+    import numpy as np  # 添加numpy导入
     
     # 1. 初始化模型优化器
     optim_m = optim.Adam(params=model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = LambdaLR(optimizer=optim_m, lr_lambda=lr_schedule)
     model = model.to(device)
     
-    # 2. 初始化自适应权重参数 (log 形式)
-    # 初始权重设为 log(1) = 0，即初始权重为 1.0
-    log_w_data = torch.zeros(1, requires_grad=True, device=device)
-    log_w_pde = torch.zeros(1, requires_grad=True, device=device)
+    # 2. 初始化自适应权重参数 (logits 形式，用于softmax)
+    # 使用三个权重，初始值设为0（softmax后为1/3）
+    logit_w_data = torch.tensor([0.0], requires_grad=True, device=device)
+    logit_w_pde = torch.tensor([0.0], requires_grad=True, device=device)
+    logit_w_boundary = torch.tensor([0.0], requires_grad=True, device=device)
     
     # 3. 初始化权重优化器 (仅优化权重参数)
-    # 权重的学习率通常可以稍大，以便快速响应损失变化
-    optim_weights = optim.Adam([log_w_data, log_w_pde], lr=0.01)
-    
+    optim_weights = optim.Adam([logit_w_data, logit_w_pde, logit_w_boundary], lr=0.01)
+
     train_loss = []
     test_loss = []
     
@@ -162,89 +149,98 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
     best_test_loss = float('inf')
     counter = 0
     best_model_state = None
-    
-    print("开始训练 (自适应权重模式)...")
+
+    print("开始训练 (三权重归一化自适应模式)...")
 
     for epoch in tqdm(range(num_epochs)):
         model.train()
         epochs_train_loss = []
-        
-        # 用于记录当前 epoch 的平均损失，用于权重更新
         epoch_loss_data_sum = 0.0
         epoch_loss_pde_sum = 0.0
+        epoch_loss_boundary_sum = 0.0
         num_batches = 0
 
         for (X, Y), param in zip(train_iter, pinn_params):
-            X = X.to(device)
-            Y = Y.to(device)
-            param = param[0].to(device)
+            X = X.to(device, non_blocking=True)
+            Y = Y.to(device, non_blocking=True)
+            param = param[0].to(device, non_blocking=True)
             
-            # --- A. 计算各项原始损失 ---
             optim_m.zero_grad()
-            optim_weights.zero_grad()
-            
             Y_pred = model(X)
             
-            # 1. 数据损失
-            loss_data = nn.MSELoss()(Y, Y_pred)
+            # Data loss: 使用相对MSE
+            loss_pred = torch.mean(((Y - Y_pred) / (torch.abs(Y) + 1e-8)) ** 2)
             
-                        # 2. 物理损失
-            # 调用 BS_PDE 计算方程残差
-            # 注意：BS_PDE 内部已经处理了 requires_grad 和导数计算
-            price_pde = BS_PDE(param)
+            # PDE loss: 确保是相对形式
+            _, loss_pi = loss_function(Y, Y_pred, param, lambda_weight)
             
-            # 处理可能的 NaN 值，防止梯度爆炸或消失
-            price_pde = torch.where(torch.isnan(price_pde), torch.zeros_like(price_pde), price_pde)
+            # 如果loss_pi不是相对形式，需要转换
+            if loss_pi.item() > 1.0:  # 经验阈值
+                norm_factor = torch.mean(torch.abs(Y_pred)) + 1e-8
+                loss_pi = loss_pi / norm_factor
             
-            # 物理损失目标是让 PDE 残差趋近于 0
-            pi_loss_target = torch.zeros_like(price_pde)
-            loss_pde = nn.MSELoss()(price_pde, pi_loss_target)
+            # Boundary loss: 计算边界条件损失（示例实现）
+            # 这里假设边界条件是Y_pred在某些特定输入下的值应满足某种条件
+            # 实际应用中需要根据具体问题定义边界条件
+            loss_boundary = torch.tensor(0.0, device=device)
+            if hasattr(model, 'compute_boundary_loss'):
+                loss_boundary = model.compute_boundary_loss(X, Y_pred)
+            else:
+                # 默认实现：假设边界条件是输出值不应过大（正则化）
+                loss_boundary = torch.mean(torch.abs(Y_pred)) / (torch.mean(torch.abs(Y)) + 1e-8)
+            
+            # 计算归一化的权重（softmax）
+            logits = torch.cat([logit_w_data, logit_w_pde, logit_w_boundary])
+            weights = torch.softmax(logits, dim=0)
+            current_w_data = weights[0]
+            current_w_pde = weights[1]
+            current_w_boundary = weights[2]
+            
+            # 计算总损失
+            loss = current_w_data * loss_pred + current_w_pde * loss_pi + current_w_boundary * loss_boundary
 
-            
-            # 累加损失用于后续计算平均值
-            epoch_loss_data_sum += loss_data.item()
-            epoch_loss_pde_sum += loss_pde.item()
-            num_batches += 1
-            
-            # --- B. 计算加权总损失 ---
-            w_data = torch.exp(log_w_data)
-            w_pde = torch.exp(log_w_pde)
-            
-            total_loss = w_data * loss_data + w_pde * loss_pde
-            
-            # --- C. 反向传播更新网络参数 ---
-            total_loss.backward(retain_graph=True) # 保留计算图用于权重更新
+            loss.backward()
             optim_m.step()
-            
-            epochs_train_loss.append(total_loss.detach())
+            epochs_train_loss.append(loss.detach())
+
+            epoch_loss_data_sum += loss_pred.detach().item()
+            epoch_loss_pde_sum += loss_pi.detach().item()
+            epoch_loss_boundary_sum += loss_boundary.detach().item()
+            num_batches += 1
 
         scheduler.step()
         epoch_train_loss = torch.mean(torch.stack(epochs_train_loss))
         train_loss.append(epoch_train_loss.item())
         
-        # --- D. 自适应权重更新逻辑 ---
-        # 计算当前 epoch 的平均损失
+        # --- 自适应权重更新逻辑 ---
         avg_loss_data = epoch_loss_data_sum / num_batches
         avg_loss_pde = epoch_loss_pde_sum / num_batches
+        avg_loss_boundary = epoch_loss_boundary_sum / num_batches
         
-        # 计算当前加权损失
-        current_w_data = torch.exp(log_w_data)
-        current_w_pde = torch.exp(log_w_pde)
-        weighted_loss_data = current_w_data * avg_loss_data
-        weighted_loss_pde = current_w_pde * avg_loss_pde
+        # 转换为tensor用于计算
+        avg_loss_data_tensor = torch.tensor(avg_loss_data, device=device)
+        avg_loss_pde_tensor = torch.tensor(avg_loss_pde, device=device)
+        avg_loss_boundary_tensor = torch.tensor(avg_loss_boundary, device=device)
         
-        # 目标：让两项加权损失趋于平衡
-        # 计算目标值（两者的平均值）
-        mean_weighted_loss = (weighted_loss_data + weighted_loss_pde) / 2.0
-        
-        # 定义权重优化的损失函数：使得各项加权损失与平均值的差距最小
-        # 注意：这里我们要更新的是 log_w，所以直接对 log_w 求导
-        loss_weights = (weighted_loss_data - mean_weighted_loss)**2 + \
-                       (weighted_loss_pde - mean_weighted_loss)**2
-        
-        # 对权重进行反向传播
-        loss_weights.backward()
-        optim_weights.step()
+        # 计算权重更新梯度（基于论文建议）
+        # 使用损失的倒数作为权重调整方向（损失越小，权重越大）
+        with torch.no_grad():
+            # 计算每个损失的相对重要性（归一化到[0,1]）
+            total_loss = avg_loss_data + avg_loss_pde + avg_loss_boundary + 1e-8
+            rel_data = avg_loss_data / total_loss
+            rel_pde = avg_loss_pde / total_loss
+            rel_boundary = avg_loss_boundary / total_loss
+            
+            # 更新logits：减少高损失项的权重，增加低损失项的权重
+            # 使用负的相对损失作为梯度方向
+            logit_w_data += 0.01 * (-rel_data)
+            logit_w_pde += 0.01 * (-rel_pde)
+            logit_w_boundary += 0.01 * (-rel_boundary)
+            
+            # 确保logits不会变得太大或太小
+            logit_w_data = torch.clamp(logit_w_data, -5, 5)
+            logit_w_pde = torch.clamp(logit_w_pde, -5, 5)
+            logit_w_boundary = torch.clamp(logit_w_boundary, -5, 5)
         
         # ============================================================
         # 测试阶段
@@ -255,9 +251,8 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
                 X_test = X_test.to(device)
                 Y_test = Y_test.to(device)
                 Y_pred_test = model(X_test)
-                # 测试时通常只看数据损失，或者看总损失（使用训练好的权重）
-                # 这里为了简单，只看 MSE
-                test_loss_value = nn.MSELoss()(Y_test, Y_pred_test)
+                # 使用相对MSE作为测试损失
+                test_loss_value = torch.mean(((Y_test - Y_pred_test) / (torch.abs(Y_test) + 1e-8)) ** 2)
                 epoch_test_loss.append(test_loss_value.detach())
 
             avg_test_loss = torch.mean(torch.stack(epoch_test_loss))
@@ -274,10 +269,18 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
                 print(f'早停触发，在第 {epoch+1} 轮停止训练')
                 break
         
+        # 计算当前权重（用于打印）
+        logits = torch.cat([logit_w_data, logit_w_pde, logit_w_boundary])
+        weights = torch.softmax(logits, dim=0)
+        current_w_data = weights[0]
+        current_w_pde = weights[1]
+        current_w_boundary = weights[2]
+
         if epoch % 10 == 0:
             print(f'Epoch {epoch}: Total Loss: {epoch_train_loss.item():.5e} | '
                   f'Data Loss: {avg_loss_data:.5e} (w: {current_w_data.item():.2f}) | '
                   f'PDE Loss: {avg_loss_pde:.5e} (w: {current_w_pde.item():.2f}) | '
+                  f'Boundary Loss: {avg_loss_boundary:.5e} (w: {current_w_boundary.item():.2f}) | '
                   f'Test Loss: {avg_test_loss.item():.5e}')
 
     # 加载最佳模型
@@ -288,7 +291,6 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
     net_name_fin = f'{net_name}' + str(test_loss_fin)
     
     # 保存模型
-    # 确保目录存在
     if not os.path.exists(f'../neural_network/train_lee/{save_dir}'):
         os.makedirs(f'../neural_network/train_lee/{save_dir}')
         
@@ -352,7 +354,7 @@ if __name__ == '__main__':
         # ===================================================================================================================
         train_loader, test_loader, pinn_loader, input_size = load_data(s_model_name=s_model_name, batch_size=batch_size, num_workers=num_workers, device=device)
         model = Cheby_KAN(input_size, output_size, middle_dim_kan, degrees, num_layers_KAN, dropout_p)
-        loss_kan, kan_name = train_test(model, train_loader, test_loader, num_epochs, lr_KAN, weight_decay, device=device, net_name='PCKAN', pinn_params=pinn_loader, save_dir=s_model_name)
+        loss_kan, kan_name = train_test(model, train_loader, test_loader, num_epochs, lr_KAN, weight_decay, device=device, net_name='PCKAN', pinn_params=pinn_loader, save_dir=s_model_name, patience=10, min_delta=1e-5)
         params_list_kan = [[lr_KAN, num_layers_KAN, num_epochs, middle_dim_kan, degrees, num_epochs, loss_kan, dropout_p, weight_decay, kan_name]]
         params_pd_kan = pd.DataFrame(params_list_kan, columns=['Learning_Rate', 'Num_Layers', "train_epochs", "middle_dim", 'Degrees', 'Num_epochs', 'Loss', "dropout_p", "weight_decay", 'Net_Name'])
         params_pd_kan.to_csv('../data/train/train_params_kan_pinn_res.csv', mode='a', index=False)
