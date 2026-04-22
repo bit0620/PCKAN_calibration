@@ -132,17 +132,23 @@ def BS_PDE(params):
 
 
 def loss_function(Y_hat, Y, params, lambda_weight):
+    """
+    计算数据损失和物理损失。
+    注意：这里不再直接相加，而是分别返回，以便在 train.py 中进行自适应权重调整。
+    """
     loss_fn = nn.MSELoss()
+    
+    # 1. 数据损失
     loss_pred = loss_fn(Y_hat, Y)
-
+    
+    # 2. 物理损失
     price_pde = BS_PDE(params)
+    # 处理可能的 NaN 值
     price_pde = torch.where(torch.isnan(price_pde), torch.zeros_like(price_pde), price_pde)
     pi_loss_target = torch.zeros_like(price_pde)
     loss_pi = loss_fn(price_pde, pi_loss_target)
-
-    loss_pred += loss_pi * lambda_weight
-
-    return loss_pred
+    
+    return loss_pred, loss_pi
 
 if __name__ == "__main__":
     train_loader, test_loader, pinn_loader, input_size = load_data(s_model_name='Heston', batch_size=32, num_workers=0)

@@ -38,37 +38,107 @@ def lr_schedule(n):
         return a
 
 
+# utils/train.py
+
+import torch
+import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import torch.nn as nn
+
+# ... (保留原有的 lr_schedule 函数定义，如果有的话) ...
+
 def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_decay, device, net_name, pinn_params, save_dir, lambda_weight=0.1):
+    # 1. 初始化模型优化器
     optim_m = optim.Adam(params=model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    loss_fn = torch.nn.MSELoss()
-    # scheduler = MultiStepLR(optimizer=optim_m, milestones=[20, 50], gamma=0.1)
     scheduler = LambdaLR(optimizer=optim_m, lr_lambda=lr_schedule)
     model = model.to(device)
-
+    
+    # 2. 初始化自适应权重参数 (log 形式)
+    # 初始权重设为 log(1) = 0
+    log_w_data = torch.zeros(1, requires_grad=True, device=device)
+    log_w_pde = torch.zeros(1, requires_grad=True, device=device)
+    
+    # 3. 初始化权重优化器 (仅优化权重参数)
+    optim_weights = optim.Adam([log_w_data, log_w_pde], lr=0.01) # 权重的学习率通常可以稍大
+    
     train_loss = []
     test_loss = []
-
+    
     for epoch in tqdm(range(num_epochs)):
-        # 训练阶段
-        # ============================================================
         model.train()
         epochs_train_loss = []
+        
+        # 用于记录当前 epoch 的平均损失，用于权重更新
+        epoch_loss_data_sum = 0.0
+        epoch_loss_pde_sum = 0.0
+        num_batches = 0
+
         for (X, Y), param in zip(train_iter, pinn_params):
             X = X.to(device)
             Y = Y.to(device)
             param = param[0].to(device)
+            
+            # --- A. 计算各项原始损失 ---
             optim_m.zero_grad()
+            optim_weights.zero_grad()
+            
             Y_pred = model(X)
-            loss = nn.MSELoss()(Y, Y_pred)
-            # loss = loss_function(Y, Y_pred, param, lambda_weight)
-            loss.backward()
+            
+            # 调用修改后的 loss_function，获取分离的损失
+            loss_data, loss_pde = loss_function(Y_pred, Y, param, lambda_weight)
+            
+            # 累加损失用于后续计算平均值
+            epoch_loss_data_sum += loss_data.item()
+            epoch_loss_pde_sum += loss_pde.item()
+            num_batches += 1
+            
+            # --- B. 计算加权总损失 ---
+            w_data = torch.exp(log_w_data)
+            w_pde = torch.exp(log_w_pde)
+            
+            total_loss = w_data * loss_data + w_pde * loss_pde
+            
+            # --- C. 反向传播更新网络参数 ---
+            total_loss.backward(retain_graph=True) # 保留计算图用于权重更新
             optim_m.step()
-            epochs_train_loss.append(loss.detach())
+            
+            epochs_train_loss.append(total_loss.detach())
 
         scheduler.step()
         epoch_train_loss = torch.mean(torch.stack(epochs_train_loss))
         train_loss.append(epoch_train_loss.item())
-        # ============================================================
+        
+        # --- D. 自适应权重更新逻辑 ---
+        # 计算当前 epoch 的平均损失
+        avg_loss_data = epoch_loss_data_sum / num_batches
+        avg_loss_pde = epoch_loss_pde_sum / num_batches
+        
+        # 计算当前加权损失
+        current_w_data = torch.exp(log_w_data)
+        current_w_pde = torch.exp(log_w_pde)
+        weighted_loss_data = current_w_data * avg_loss_data
+        weighted_loss_pde = current_w_pde * avg_loss_pde
+        
+        # 目标：让两项加权损失趋于平衡
+        # 计算目标值（两者的平均值）
+        mean_weighted_loss = (weighted_loss_data + weighted_loss_pde) / 2.0
+        
+        # 定义权重优化的损失函数：使得各项加权损失与平均值的差距最小
+        # 注意：这里我们要更新的是 log_w，所以直接对 log_w 求导
+        loss_weights = (weighted_loss_data - mean_weighted_loss)**2 + \
+                       (weighted_loss_pde - mean_weighted_loss)**2
+        
+        # 对权重进行反向传播
+        loss_weights.backward()
+        optim_weights.step()
+        
+        # 打印信息
+        if epoch % 10 == 0:
+            print(f'Epoch {epoch}: Total Loss: {epoch_train_loss.item():.5e} | '
+                  f'Data Loss: {avg_loss_data:.5e} (w: {current_w_data.item():.2f}) | '
+                  f'PDE Loss: {avg_loss_pde:.5e} (w: {current_w_pde.item():.2f})')
 
         # ============================================================
         # 测试阶段
@@ -79,34 +149,33 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
                 X_test = X_test.to(device)
                 Y_test = Y_test.to(device)
                 Y_pred_test = model(X_test)
-                test_loss_value = loss_fn(Y_test, Y_pred_test)
+                # 测试时通常只看数据损失，或者看总损失（使用训练好的权重）
+                # 这里为了简单，只看 MSE
+                test_loss_value = nn.MSELoss()(Y_test, Y_pred_test)
                 epoch_test_loss.append(test_loss_value.detach())
 
             avg_test_loss = torch.mean(torch.stack(epoch_test_loss))
             test_loss.append(avg_test_loss.item())
 
-        # scheduler.step(avg_test_loss)
-        # ============================================================
-        if epoch % 10 == 0:
-            print(f'训练误差为{train_loss[-1]}', f'测试误差为{test_loss[-1]}]')
-
     test_loss_fin = test_loss[-1]
     net_name_fin = f'{net_name}' + str(test_loss_fin)
-    train_loss = torch.tensor(train_loss).numpy()
-    test_loss = torch.tensor(test_loss).numpy()
+    
+    # 保存模型
     torch.save(model, f'../neural_network/train_res/{save_dir}/{net_name_fin}.pt')
-
+    
+    # 绘图
     plt.figure(figsize=(10, 6))
-    plt.plot(train_loss, label='训练误差')
-    plt.plot(test_loss, label='测试误差')
-    plt.xlabel('批量')
-    plt.ylabel('损失')
-    plt.title('训练和测试误差曲线')
+    plt.plot(train_loss, label='train loss')
+    plt.plot(test_loss, label='test loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Testing Loss')
     plt.legend()
     plt.grid(True)
     plt.show()
-
+    
     return test_loss_fin, net_name_fin
+
 
 
 if __name__ == '__main__':
