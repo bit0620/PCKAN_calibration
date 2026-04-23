@@ -63,7 +63,7 @@ class Cheby2KANLayer(nn.Module):
         std_W = torch.sqrt(torch.tensor(5.0 / (self.input_dim + self.outdim)))
         nn.init.normal_(self.W, mean=0.0, std=std_W)
 
-        # initialize \tilde{W}^{(l)}_{q,p,n}
+        # initialize 	ilde{W}^{(l)}_{q,p,n}
         self.tilde_W = nn.Parameter(torch.empty(self.outdim, self.input_dim, self.degree + 1))
         std_tilde_W = 1.0 / (self.degree + 1)
         nn.init.normal_(self.tilde_W, mean=0.1, std=std_tilde_W)
@@ -92,7 +92,7 @@ class Cheby2KANLayer(nn.Module):
 
         cheby = torch.stack(cheby_list, dim=2)
 
-        # s_{b,q,p} = sum_{n=0}^{D_l} \tilde{W}_{q,p,n} * U_n(x_p)
+        # s_{b,q,p} = sum_{n=0}^{D_l} 	ilde{W}_{q,p,n} * U_n(x_p)
         s = torch.einsum('bpn, qpn->bqp', cheby, self.tilde_W)
         y = torch.einsum('bqp, qp->bq', s, self.W)
 
@@ -141,28 +141,24 @@ class Cheby_KAN(nn.Module):
 
         # 遍历模型的所有层：i=层索引，layer=当前层
         for i, layer in enumerate(self.layers):
-            # 3. 判断：当前层是不是【切比雪夫二阶KAN层】（自定义核心层）
+            # 判断：当前层是不是【切比雪夫二阶KAN层】（自定义核心层）
             if isinstance(layer, Cheby2KANLayer):
-                # 4. 核心：满足3个条件 → 给KAN层加【残差连接】
+                # 核心：满足3个条件 → 给KAN层加【残差连接】
                 # 残差连接条件：中间层 + KAN层 + 输入输出维度一致
                 if i != 0 and i != len(self.layers) - 1 and x.size(1) == layer.outdim:
-                    # 先通过KAN层
-                    out = layer(x)
-                    # 应用Chebyshev GeLU激活函数
-                    if self.use_cheby_gelu:
-                        out = self.cheby_gelu(out)
                     # 残差计算：层输出 + 层输入（Residual Connection）
-                    x = out + x
+                    x = layer(x) + x
                 # 不满足条件 → KAN层正常计算，不加残差
                 else:
                     x = layer(x)
-                    # 应用Chebyshev GeLU激活函数
-                    if self.use_cheby_gelu:
-                        x = self.cheby_gelu(x)
-            # 5. 非KAN层（如归一化、激活、线性层）：直接正常计算
+            # 非KAN层（如归一化、激活、线性层）：直接正常计算
             else:
                 x = layer(x)
-        
+
+        # 可选：应用ChebyshevGeLU激活函数
+        if self.use_cheby_gelu:
+            x = self.cheby_gelu(x)
+
         # 不再使用sigmoid限制输出，允许模型学习更广泛的范围
         # 返回最终前向传播结果
         return x
@@ -170,14 +166,14 @@ class Cheby_KAN(nn.Module):
     def compute_boundary_loss(self, X_norm, Y_pred_norm, X_mean, X_std, Y_mean, Y_std, spot_min, spot_max):
         """
         计算边界条件损失
-        
+
         参数:
             X_norm: 无量纲化的输入特征 (batch_size, feature_dim)
             Y_pred_norm: 无量纲化的预测输出 (batch_size, 1)
             X_mean, X_std: 输入特征的均值和标准差 (1, feature_dim)
             Y_mean, Y_std: 输出的均值和标准差 (1, 1)
             spot_min, spot_max: spot价格的最小和最大值（标量）
-            
+
         返回:
             边界损失
         """
@@ -185,23 +181,19 @@ class Cheby_KAN(nn.Module):
         # X_mean和X_std的形状是(1, feature_dim)，我们需要正确地广播
         spot = X_norm[:, 0:1] * X_std[:, 0:1] + X_mean[:, 0:1]  # 形状: (batch_size, 1)
         Y_pred = Y_pred_norm * Y_std + Y_mean  # 形状: (batch_size, 1)
-        
+
         # 边界1: S → 0 时期权价格 → 0 ⇒ 隐含波动率应有限
         mask_low = spot < (spot_min * 1.1)
         loss_low = torch.mean(Y_pred[mask_low]**2) if mask_low.any() else torch.tensor(0.0, device=X_norm.device)
-        
+
         # 边界2: S → ∞ 时期权价格 → S - K*exp(-rT) ⇒ 波动率应平滑
         mask_high = spot > (spot_max * 0.9)
         if mask_high.any() and mask_high.sum() > 1:
             loss_high = torch.mean(torch.abs(torch.diff(Y_pred[mask_high])))
         else:
             loss_high = torch.tensor(0.0, device=X_norm.device)
-        
+
         return loss_low + loss_high
-
-
-
-
 
 
 if __name__ == '__main__':
