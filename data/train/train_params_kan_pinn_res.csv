@@ -54,3 +54,41 @@ Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout
 0.005,2,300,64,"[3, 4, 5, 5, 6]",300,1.66277277469635,0.15,5e-06,PCKAN1.66277277469635
 Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
 0.005,2,300,64,"[3, 5, 5, 5, 5]",300,1.6181641817092896,0.15,1e-05,PCKAN1.6181641817092896
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.005,4,300,64,"[3, 5, 5, 5, 5]",300,1907142016.0,0.1,1e-05,PCKAN1907142016.0
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.005,4,300,64,"[3, 5, 5, 5, 6]",300,2421601792.0,0.1,1e-05,PCKAN2421601792.0
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.005,4,300,64,"[3, 4, 5, 5, 6]",300,2052343040.0,0.1,1e-05,PCKAN2052343040.0
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,64,"[3, 5, 5, 5, 5]",200,51176.1328125,0.0,1e-05,PCKAN51176.1328125
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,64,"[3, 5, 5, 5, 5]",200,14004.01953125,0.0,5e-06,PCKAN14004.01953125
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,49594.92578125,0.0,1e-05,PCKAN49594.92578125
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,25281.126953125,0.0,5e-06,PCKAN25281.126953125
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,489.47027587890625,0.1,1e-05,PCKAN489.47027587890625
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,300,144,"[3, 5, 5, 5, 5]",300,0.19647228717803955,0.1,1e-05,PCKAN0.19647228717803955
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,1684.676025390625,0.1,1e-05,PCKAN1684.676025390625
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,64,"[3, 5, 5, 5, 5]",200,182924.796875,0.2,1e-05,PCKAN182924.796875
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,300,64,"[3, 5, 5, 5, 5]",300,11137.091796875,0.2,1e-05,PCKAN11137.091796875
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.13501518964767456,0.1,1e-05,PCKAN0.13501518964767456
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.13499943912029266,0.1,5e-06,PCKAN0.13499943912029266
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.13503073155879974,0.0,1e-05,PCKAN0.13503073155879974
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.1349869966506958,0.0,5e-06,PCKAN0.1349869966506958
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.13502924144268036,0.2,1e-05,PCKAN0.13502924144268036
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.09328372031450272,0.1,1e-05,PCKAN0.09328372031450272
+Learning_Rate,Num_Layers,train_epochs,middle_dim,Degrees,Num_epochs,Loss,dropout_p,weight_decay,Net_Name
+0.2,3,200,144,"[3, 5, 5, 5, 5]",200,0.09347525984048843,0.1,5e-06,PCKAN0.09347525984048843

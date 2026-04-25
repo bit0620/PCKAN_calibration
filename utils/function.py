@@ -15,7 +15,6 @@ def load_data(s_model_name, batch_size=32, num_workers=4, device='cuda', random_
         model_data = pd.read_csv(f'../data/calibration_params/{s_model_name}/Heston_params.csv').to_numpy()
     else:
         model_data = pd.read_csv(f'../data/calibration_params/{s_model_name}/FVSJ_params.csv').to_numpy()
-
     y = option_data[:, -1].reshape(-1, 1)
     option_data = option_data[:, :-1]
     
@@ -25,7 +24,7 @@ def load_data(s_model_name, batch_size=32, num_workers=4, device='cuda', random_
     # 合并数据
     X = np.concatenate([option_data, model_data], axis=1)
 
-    # 划分训练测试集 (添加随机打乱)
+    # 划分训练测试集
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=random_state
     )
@@ -33,35 +32,43 @@ def load_data(s_model_name, batch_size=32, num_workers=4, device='cuda', random_
     pinn_data = X_train[:, :len(option_data[0])]
     X_train = X_train[:, 1:]
     X_test = X_test[:, 1:]
+    
     # 分别标准化特征
     x_scaler = StandardScaler()
     X_train = x_scaler.fit_transform(X_train)
-    X_test = x_scaler.transform(X_test)  # 使用训练集的参数
+    X_test = x_scaler.transform(X_test)
     
     # 标准化目标值
     y_scaler = MinMaxScaler()
     y_train = y_scaler.fit_transform(y_train)
     y_test = y_scaler.transform(y_test)
     
-    # 修改这部分：不要将数据直接移动到CUDA
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)  # 移除 .to(device)
+    # 获取标准化参数
+    maturity_mean = torch.tensor(x_scaler.mean_[0], dtype=torch.float32)
+    maturity_std = torch.tensor(x_scaler.scale_[0], dtype=torch.float32)
+    spot_mean = torch.tensor(x_scaler.mean_[1], dtype=torch.float32)
+    spot_std = torch.tensor(x_scaler.scale_[1], dtype=torch.float32)
+    target_mean = torch.tensor(y_scaler.data_min_[0], dtype=torch.float32)
+    target_std = torch.tensor(y_scaler.data_range_[0], dtype=torch.float32)
+    
+    # 转换为张量
+    X_train_t = torch.tensor(X_train, dtype=torch.float32)
     y_train_t = torch.tensor(y_train, dtype=torch.float32)
     X_test_t = torch.tensor(X_test, dtype=torch.float32)
     y_test_t = torch.tensor(y_test, dtype=torch.float32)
     pinn_data_t = torch.tensor(pinn_data, dtype=torch.float32)
     
-    # 创建数据集
+    # 创建数据集和数据加载器
     train_dataset = TensorDataset(X_train_t, y_train_t)
     test_dataset = TensorDataset(X_test_t, y_test_t)
     pinn_dataset = TensorDataset(pinn_data_t)
     
-    # 修改DataLoader参数
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,  # 保持pin_memory以加速CPU到GPU的传输
+        pin_memory=True,
         persistent_workers=True if num_workers > 0 else False,
         prefetch_factor=4 if num_workers > 0 else None
     )
@@ -87,7 +94,20 @@ def load_data(s_model_name, batch_size=32, num_workers=4, device='cuda', random_
     )
     
     input_size = X_train.shape[1]
-    return train_loader, test_loader, pinn_loader, input_size
+    
+    # 返回标准化参数
+    scaler_params = {
+        'maturity_mean': maturity_mean,
+        'maturity_std': maturity_std,
+        'spot_mean': spot_mean,
+        'spot_std': spot_std,
+        'target_mean': target_mean,
+        'target_std': target_std,
+        'y_scaler': y_scaler  # 添加y_scaler用于反归一化
+    }
+    
+    return train_loader, test_loader, pinn_loader, input_size, scaler_params
+
 
 
 def black_scholes_price(cp, spot, strike, maturity, vol, r):
@@ -156,103 +176,80 @@ def BS_PDE(params):
     return f
 
 
-def loss_function(Y_hat, Y, params, lambda_weight):
-    """
-    计算数据损失和物理损失。
-    注意：这里不再直接相加，而是分别返回，以便在 train.py 中进行自适应权重调整。
-    """
-    loss_fn = nn.MSELoss()
-    
-    # 1. 数据损失
-    loss_pred = loss_fn(Y_hat, Y)
-    
-    # 2. 物理损失 - 使用预测的隐含波动率计算PDE残差
-    # 从params中提取参数
-    iv = params[:, 0].view(-1, 1)  # 隐含波动率
-    cp = params[:, 1].view(-1, 1)  # 期权类型
-    maturity = params[:, 2].view(-1, 1)  # 到期时间
-    strike = params[:, 3].view(-1, 1)  # 行权价
-    spot = params[:, 4].view(-1, 1)  # 标的资产价格
-    r = params[:, 5].view(-1, 1)  # 无风险利率
+def _normalize_target(target, target_mean, target_std):
+    """归一化目标值"""
+    return (target - target_mean) / target_std
 
-    # 使用预测的隐含波动率计算期权价格
-    # 注意：这里使用模型预测的Y_hat作为波动率
-    option_price = black_scholes_price(cp, spot, strike, maturity, Y_hat, r)
+def _indexed_mse(Y_hat, Y_target, indices):
+    """计算指定索引的MSE"""
+    if len(indices) == 0:
+        return torch.tensor(0.0, device=Y_hat.device)
+    return torch.mean(torch.square(Y_hat[indices] - Y_target[indices]))
 
-    # 计算期权价格的PDE残差
-    # 使用解析导数公式计算PDE残差
-    # 在Black-Scholes模型中，期权价格满足PDE：dc/dt + r*c - r*S*dc/dS - 0.5*sigma^2*S^2*d^2c/dS^2 = 0
-    # 但是，由于我们使用的是Black-Scholes公式，理论上这个残差应该为0
-    # 所以，我们可以使用解析导数公式来计算PDE残差
+def bs_pde_residual(Y_hat, X, params):
+    """计算Black-Scholes PDE残差"""
+    # params columns: [contractType, dayToExpire, iv, strikePrice, spotPrice, RFR]
+    maturity = params[:, 1].reshape(-1, 1)
+    vol = params[:, 2].reshape(-1, 1)
+    strike = params[:, 3].reshape(-1, 1)
+    spot = params[:, 4].reshape(-1, 1)
+    r = params[:, 5].reshape(-1, 1)
 
-    # 计算d1和d2
-    d1 = (torch.log(spot / strike) + (r + 0.5 * Y_hat**2) * maturity) / (Y_hat * torch.sqrt(maturity))
-    d2 = d1 - Y_hat * torch.sqrt(maturity)
+    # 计算Y_hat对maturity和spot的导数
+    Y_hat_grad = torch.autograd.grad(
+        Y_hat, X, 
+        grad_outputs=torch.ones_like(Y_hat),
+        create_graph=True, retain_graph=True
+    )[0]
 
-    # 计算标准正态分布的PDF和CDF
-    pdf_d1 = torch.exp(-0.5 * d1**2) / torch.sqrt(2 * torch.tensor(3.14159, device=spot.device))
-    cdf_d1 = 0.5 * (1 + torch.erf(d1 / torch.sqrt(torch.tensor(2.0, device=spot.device))))
-    cdf_d2 = 0.5 * (1 + torch.erf(d2 / torch.sqrt(torch.tensor(2.0, device=spot.device))))
+    # 假设X的第0列是maturity，第1列是spot
+    dVdT = Y_hat_grad[:, 0].reshape(-1, 1)
+    dVdS = Y_hat_grad[:, 1].reshape(-1, 1)
 
-    # 计算看涨和看跌期权价格
-    call_price = spot * cdf_d1 - strike * torch.exp(-r * maturity) * cdf_d2
-    put_price = strike * torch.exp(-r * maturity) * (1 - cdf_d2) - spot * (1 - cdf_d1)
+    # 计算二阶导数
+    d2VdS2 = torch.autograd.grad(
+        dVdS, X,
+        grad_outputs=torch.ones_like(dVdS),
+        create_graph=True, retain_graph=True
+    )[0][:, 1].reshape(-1, 1)
 
-    # 根据cp标志选择看涨或看跌价格
-    option_price_bs = torch.where(cp == 1, call_price, put_price)
+    # Black-Scholes PDE残差
+    pde_res = dVdT + r * Y_hat - r * spot * dVdS - 0.5 * torch.square(vol * spot) * d2VdS2
+    return pde_res
 
-    # 计算PDE残差
-    # 对于Black-Scholes公式，理论上残差应该为0
-    # 但由于我们使用的是预测的隐含波动率，残差可能不为0
-    # 我们可以使用数值差分来计算导数
-    epsilon = 1e-5
+def loss_function(Y_hat, Y, X, params, beta, target_mean, target_std):
+    # params columns: [contractType, dayToExpire, iv, strikePrice, spotPrice, RFR]
+    maturity = params[:, 1]
+    strike = params[:, 3]
+    spot = params[:, 4]
+    r = params[:, 5]
 
-    # 计算关于maturity的导数
-    maturity_plus = maturity + epsilon
-    option_price_plus = black_scholes_price(cp, spot, strike, maturity_plus, Y_hat, r)
-    c_t = (option_price_plus - option_price) / epsilon
+    # IVP target: V(t=T, S) = max(S-K, 0)
+    ivp_target_raw = torch.clamp(spot - strike, min=0.0)
+    ivp_target = _normalize_target(ivp_target_raw, target_mean, target_std).reshape_as(Y_hat)
 
-    # 计算关于spot的导数
-    spot_plus = spot + epsilon
-    option_price_plus = black_scholes_price(cp, spot_plus, strike, maturity, Y_hat, r)
-    c_s = (option_price_plus - option_price) / epsilon
+    # BVP targets for call option
+    bvp1_target_raw = torch.zeros_like(spot)
+    bvp2_target_raw = spot - strike * torch.exp(-r * maturity)
+    bvp1_target = _normalize_target(bvp1_target_raw, target_mean, target_std).reshape_as(Y_hat)
+    bvp2_target = _normalize_target(bvp2_target_raw, target_mean, target_std).reshape_as(Y_hat)
 
-    # 计算关于spot的二阶导数
-    spot_minus = spot - epsilon
-    option_price_minus = black_scholes_price(cp, spot_minus, strike, maturity, Y_hat, r)
-    c_ss = (option_price_plus - 2 * option_price + option_price_minus) / (epsilon**2)
+    # Use smallest/ largest samples in batch as boundary subsets to form Phi/Gamma/Omega'
+    batch_size = Y_hat.shape[0]
+    k = max(1, batch_size // 8)
+    ivp_idx = torch.argsort(maturity)[:k]
+    bvp1_idx = torch.argsort(spot)[:k]
+    bvp2_idx = torch.argsort(spot, descending=True)[:k]
 
-    # 计算PDE残差
-    term1 = c_t
-    term2 = r*option_price
-    term3 = r*spot*c_s
-    term4 = torch.square(Y_hat*spot)*c_ss*0.5
-    f = term1 + term2 - term3 - term4
+    mse_ivp = _indexed_mse(Y_hat, ivp_target, ivp_idx)
+    mse_bvp1 = _indexed_mse(Y_hat, bvp1_target, bvp1_idx)
+    mse_bvp2 = _indexed_mse(Y_hat, bvp2_target, bvp2_idx)
+    mse_bvp = mse_bvp1 + mse_bvp2
 
-    # 对PDE残差进行归一化，使得各项的量级更加平衡
-    # 除以spot^2，使得各项的量级更加平衡
-    f_normalized = f / (torch.square(spot) + 1e-8)  # 加上小常数避免除以0
+    pde_res = bs_pde_residual(Y_hat, X, params)
+    mse_pde = torch.mean(torch.square(pde_res))
 
-    # 打印调试信息（只在第一个batch打印）
-    if torch.rand(1).item() < 0.01:  # 约1%的概率打印
-        print(f"PDE残差各部分量级:")
-        print(f"  c_t: {torch.mean(torch.abs(term1)).item():.6e}")
-        print(f"  r*option_price: {torch.mean(torch.abs(term2)).item():.6e}")
-        print(f"  r*spot*c_s: {torch.mean(torch.abs(term3)).item():.6e}")
-        print(f"  0.5*(Y_hat*spot)^2*c_ss: {torch.mean(torch.abs(term4)).item():.6e}")
-        print(f"  PDE残差f: {torch.mean(torch.abs(f)).item():.6e}")
-        print(f"  归一化PDE残差: {torch.mean(torch.abs(f_normalized)).item():.6e}")
-        print(f"  Y_hat范围: [{torch.min(Y_hat).item():.6e}, {torch.max(Y_hat).item():.6e}]")
-        print(f"  option_price范围: [{torch.min(option_price).item():.6e}, {torch.max(option_price).item():.6e}]")
-
-    # 处理可能的 NaN 值
-    f_normalized = torch.where(torch.isnan(f_normalized), torch.zeros_like(f_normalized), f_normalized)
-
-    # PDE Loss是残差与0的MSE
-    pi_loss_target = torch.zeros_like(f_normalized)
-    loss_pi = loss_fn(f_normalized, pi_loss_target)
-    
-    return loss_pred, loss_pi
+    return mse_ivp + mse_bvp + beta * mse_pde
 
 if __name__ == "__main__":
     train_loader, test_loader, pinn_loader, input_size = load_data(s_model_name='Heston', batch_size=32, num_workers=0)

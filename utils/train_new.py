@@ -39,10 +39,10 @@ def lr_schedule(n):
 def generate_param_combinations_csv(output_path='../data/train/train_params.csv'):
     """
     生成参数组合CSV文件
-    
+
     参数:
         output_path (str): 输出CSV文件的路径，默认为'../data/train/train_params.csv'
-    
+
     返回:
         None
     """
@@ -50,10 +50,10 @@ def generate_param_combinations_csv(output_path='../data/train/train_params.csv'
     import os
     import json  # 添加json模块，用于处理列表类型参数
     from itertools import product
-    
+
     # 确保输出目录存在
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
     # 定义参数网格
     param_grid = {
         'batch_size': [2048],
@@ -72,12 +72,12 @@ def generate_param_combinations_csv(output_path='../data/train/train_params.csv'
         'degrees': [[3, 5, 5, 5, 5]]
     }
 
-    
+
     # 生成所有参数组合
     keys = param_grid.keys()
     values = param_grid.values()
     combinations = list(product(*values))
-    
+
     # 创建DataFrame
     df = pd.DataFrame(combinations, columns=keys)
     # 保存到CSV文件
@@ -88,7 +88,7 @@ def generate_param_combinations_csv(output_path='../data/train/train_params.csv'
 def load_params_from_csv(csv_path='../data/train/train_params.csv'):
     """从CSV文件加载训练参数"""
     import json  # 添加json模块，用于处理列表类型参数
-    
+
     df = pd.read_csv(csv_path)
     params_list = []
     for _, row in df.iterrows():
@@ -111,144 +111,7 @@ def load_params_from_csv(csv_path='../data/train/train_params.csv'):
         params_list.append(params)
     return params_list
 
-def pinn_formula_loss(model, X, params, beta_pde=1.0, bvp1_weight=1.0, bvp2_weight=1.0,
-                      maturity_feature=(0, 1), spot_feature=(2, 2), seq_all_steps=True,
-                      maturity_mean=None, maturity_std=None, spot_mean=None, spot_std=None,
-                      target_mean=None, target_std=None,
-                      fixed_spot_min=None, fixed_spot_max=None):
-    """
-    Loss(beta) = MSE_ivp + MSE_bvp + beta * MSE_pde
-    where MSE_bvp = bvp1_weight * MSE_bvp1 + bvp2_weight * MSE_bvp2.
-
-    Boundary/initial conditions for call options:
-    - BVP1: S = S_min, V = 0
-    - BVP2: S = S_max, V = S_max - K * exp(-r * t)
-    - IVP:  t = T,     V = max(S - K, 0)
-    """
-    loss_fn = nn.MSELoss()
-
-    maturity_idx = maturity_feature[1]  # 只使用特征索引
-    spot_idx = spot_feature[1]  # 只使用特征索引
-
-    # Use feature statistics to keep derivatives and boundary conditions consistent
-    # with normalized network inputs.
-    one = torch.tensor(1.0, device=X.device, dtype=X.dtype)
-    maturity_std = one if maturity_std is None else maturity_std.to(X.device, dtype=X.dtype)
-    spot_std = one if spot_std is None else spot_std.to(X.device, dtype=X.dtype)
-    maturity_mean = torch.tensor(0.0, device=X.device, dtype=X.dtype) if maturity_mean is None else maturity_mean.to(X.device, dtype=X.dtype)
-    spot_mean = torch.tensor(0.0, device=X.device, dtype=X.dtype) if spot_mean is None else spot_mean.to(X.device, dtype=X.dtype)
-
-    target_std = one if target_std is None else target_std.to(X.device, dtype=X.dtype)
-    target_mean = torch.tensor(0.0, device=X.device, dtype=X.dtype) if target_mean is None else target_mean.to(X.device, dtype=X.dtype)
-
-    # Core prediction on interior samples (used for PDE residual).
-    # CuDNN RNN kernels do not support double backward; second derivatives
-    # for PDE residual therefore run with CuDNN disabled.
-    with torch.backends.cudnn.flags(enabled=False):
-        X_diff = X.clone().detach().requires_grad_(True)
-        V_pred_norm = model(X_diff)
-
-        grads = grad(V_pred_norm, X_diff, grad_outputs=torch.ones_like(V_pred_norm),
-                     create_graph=True, retain_graph=True)[0]
-        # Convert gradients from normalized coordinates to physical coordinates,
-        # then map from normalized target to physical option price.
-        dVdT = target_std * (grads[:, maturity_idx] / maturity_std)
-        dVdS = target_std * (grads[:, spot_idx] / spot_std)
-
-        grads2 = grad(dVdS, X_diff, grad_outputs=torch.ones_like(dVdS),
-                      create_graph=True, retain_graph=True)[0]
-        d2VdS2 = grads2[:, spot_idx] / torch.square(spot_std)
-        V_pred = V_pred_norm * target_std + target_mean
-
-    # 确保所有张量的维度一致
-    batch_size = X.shape[0]
-    
-    # 提取参数并确保维度一致
-    maturity = params[:, 1].reshape(batch_size, 1)
-    sigma = params[:, 2].reshape(batch_size, 1)
-    strike = params[:, 3].reshape(batch_size, 1)
-    spot = params[:, 4].reshape(batch_size, 1)
-    r = params[:, 5].reshape(batch_size, 1)
-    option_type = params[:, 0].reshape(batch_size, 1)
-    
-    # 保存原始的maturity和spot值，用于边界条件计算
-    maturity_orig = maturity.clone()
-    spot_orig = spot.clone()
-
-    # 确保导数张量的维度一致
-    dVdT = dVdT.reshape(batch_size, 1)
-    dVdS = dVdS.reshape(batch_size, 1)
-    d2VdS2 = d2VdS2.reshape(batch_size, 1)
-    V_pred = V_pred.reshape(batch_size, 1)
-
-    # 计算 PDE 残差
-    pde_residual = dVdT - r * V_pred + r * spot * dVdS + 0.5 * torch.square(sigma * spot) * d2VdS2
-    mse_pde = loss_fn(pde_residual, torch.zeros_like(pde_residual))
-
-    # Prepare boundary-condition inputs
-    X_bc = X.clone()
-    
-    if fixed_spot_min is None:
-        S_min = torch.min(spot).detach()
-    else:
-        S_min = fixed_spot_min.to(X.device, dtype=X.dtype).detach()
-
-    if fixed_spot_max is None:
-        S_max = torch.max(spot).detach()
-    else:
-        S_max = fixed_spot_max.to(X.device, dtype=X.dtype).detach()
-
-    S_min_norm = (S_min - spot_mean) / spot_std
-    S_max_norm = (S_max - spot_mean) / spot_std
-    t_terminal_norm = (torch.tensor(0.0, device=X.device, dtype=X.dtype) - maturity_mean) / maturity_std
-
-    # BVP1: S = S_min, V = 0
-    X_bvp1 = X_bc.clone()
-    X_bvp1[:, spot_idx] = S_min_norm
-    V_bvp1_norm = model(X_bvp1)  # 保持归一化输出
-    # type==1 -> call, else put
-    bvp1_call = torch.zeros_like(V_bvp1_norm)
-    bvp1_put = torch.clamp(strike * torch.exp(-r * maturity_orig) - S_min, min=0.0)
-    bvp1_target = torch.where(option_type == 1, bvp1_call, bvp1_put)
-    # 将目标值也归一化
-    bvp1_target_norm = (bvp1_target - target_mean) / target_std
-    mse_bvp1 = loss_fn(V_bvp1_norm, bvp1_target_norm)
-
-    # BVP2: S = S_max, V = S_max - K * exp(-r * t)
-    X_bvp2 = X_bc.clone()
-    X_bvp2[:, spot_idx] = S_max_norm
-    V_bvp2_norm = model(X_bvp2)  # 保持归一化输出
-    bvp2_call = torch.clamp(S_max - strike * torch.exp(-r * maturity_orig), min=0.0)
-    bvp2_put = torch.zeros_like(V_bvp2_norm)
-    bvp2_target = torch.where(option_type == 1, bvp2_call, bvp2_put)
-    # 将目标值也归一化
-    bvp2_target_norm = (bvp2_target - target_mean) / target_std
-    mse_bvp2 = loss_fn(V_bvp2_norm, bvp2_target_norm)
-
-    # IVP: t = T, V = max(S - K, 0)
-    X_ivp = X_bc.clone()
-    X_ivp[:, maturity_idx] = t_terminal_norm
-    V_ivp_norm = model(X_ivp)  # 保持归一化输出
-    ivp_call = torch.clamp(spot_orig - strike, min=0.0)
-    ivp_put = torch.clamp(strike - spot_orig, min=0.0)
-    ivp_target = torch.where(option_type == 1, ivp_call, ivp_put)
-    # 将目标值也归一化
-    ivp_target_norm = (ivp_target - target_mean) / target_std
-    mse_ivp = loss_fn(V_ivp_norm, ivp_target_norm)
-    
-    mse_bvp = bvp1_weight * mse_bvp1 + bvp2_weight * mse_bvp2
-    total_loss = mse_ivp + mse_bvp + beta_pde * mse_pde
-
-    return total_loss, {
-        'mse_ivp': mse_ivp.detach(),
-        'mse_bvp1': mse_bvp1.detach(),
-        'mse_bvp2': mse_bvp2.detach(),
-        'mse_bvp': mse_bvp.detach(),
-        'mse_pde': mse_pde.detach(),
-        'beta_pde': torch.tensor(beta_pde, device=X.device)
-    }
-
-def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_decay, device, net_name, pinn_params, save_dir, lambda_weight=0.1, 
+def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_decay, device, net_name, pinn_params, save_dir, lambda_weight=0.1,
                beta_pde=1.0, bvp1_weight=1.0, bvp2_weight=1.0,
                maturity_feature=(0, 1), spot_feature=(2, 2), seq_all_steps=True,
                maturity_mean=None, maturity_std=None, spot_mean=None, spot_std=None,
@@ -275,6 +138,7 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
                 # 如果param是元组，取第一个元素
                 param = param[0].to(device)
             # 检查param的形状，确保它是(batch_size, 6)
+            batch_size = X.shape[0]
             if param.dim() == 1:
                 # 如果param是一维张量，说明只有一个样本，需要扩展维度
                 param = param.unsqueeze(0).expand(batch_size, -1)
@@ -287,24 +151,12 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
                 # 如果param的第一个维度不等于batch_size，需要调整
                 param = param.unsqueeze(0).expand(batch_size, -1)
             optim_m.zero_grad()
-            
-            # 使用pinn_formula_loss计算损失
-            total_loss, loss_dict = pinn_formula_loss(
-                model, X, param, 
-                beta_pde=beta_pde,
-                bvp1_weight=bvp1_weight,
-                bvp2_weight=bvp2_weight,
-                maturity_feature=maturity_feature,
-                spot_feature=spot_feature,
-                seq_all_steps=seq_all_steps,
-                maturity_mean=maturity_mean,
-                maturity_std=maturity_std,
-                spot_mean=spot_mean,
-                spot_std=spot_std,
-                target_mean=target_mean,
-                target_std=target_std
-            )
-            
+
+            # 使用loss_function计算损失
+            X.requires_grad_(True)
+            Y_hat = model(X)
+            total_loss = loss_function(Y_hat, Y, X, param, beta_pde, target_mean, target_std)
+
             total_loss.backward()
             optim_m.step()
             epochs_train_loss.append(total_loss.detach())
@@ -338,25 +190,13 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
             elif param_test.shape[0] != X_test.shape[0]:
                 # 如果param_test的第一个维度不等于batch_size，需要调整
                 param_test = param_test.unsqueeze(0).expand(X_test.shape[0], -1)
-            
-            # 测试时也使用pinn_formula_loss
+
+            # 测试时也使用loss_function
             with torch.set_grad_enabled(True):
-                test_total_loss, _ = pinn_formula_loss(
-                    model, X_test, param_test,
-                    beta_pde=beta_pde,
-                    bvp1_weight=bvp1_weight,
-                    bvp2_weight=bvp2_weight,
-                    maturity_feature=maturity_feature,
-                    spot_feature=spot_feature,
-                    seq_all_steps=seq_all_steps,
-                    maturity_mean=maturity_mean,
-                    maturity_std=maturity_std,
-                    spot_mean=spot_mean,
-                    spot_std=spot_std,
-                    target_mean=target_mean,
-                    target_std=target_std
-                )
-                
+                X_test.requires_grad_(True)
+                Y_test_hat = model(X_test)
+                test_total_loss = loss_function(Y_test_hat, Y_test, X_test, param_test, beta_pde, target_mean, target_std)
+
             epoch_test_loss.append(test_total_loss.detach())
 
         avg_test_loss = torch.mean(torch.stack(epoch_test_loss))
@@ -386,35 +226,33 @@ def train_test(model, train_iter, test_iter, num_epochs, learning_rate, weight_d
 
 
 
-
-
 if __name__ == '__main__':
     # 检查参数文件是否存在，不存在则生成
     csv_path = '../data/train/train_params.csv'
     if not os.path.exists(csv_path):
         print(f"参数文件 {csv_path} 不存在，正在生成...")
         generate_param_combinations_csv(csv_path)
-    
+
     # 从CSV文件加载参数
     params_list = load_params_from_csv(csv_path)
-    
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print('当前设备', device)
-    
+
     # 循环处理每组参数
     for idx, params in enumerate(params_list):
         print(f"\n开始训练第 {idx+1} 组参数...")
-        
+
         # 从参数字典中获取参数
         batch_size = params['batch_size']
         num_workers = params['num_workers']
         num_epochs = params['num_epochs']
-        
+
         # ANN参数
         lr_ANN = params['lr_ANN']
         middle_dim = params['middle_dim']
         num_layers_ANN = params['num_layers_ANN']
-        
+
         # KAN参数
         lr_KAN = params['lr_KAN']
         num_layers_KAN = params['num_layers_KAN']
@@ -422,22 +260,22 @@ if __name__ == '__main__':
         dropout_p = params['dropout_p']
         weight_decay = params['weight_decay']
         degrees = params['degrees']  # 添加degrees参数赋值
-        
+
         # 模型参数
         output_size = params['output_size']
         s_model_name = params['s_model_name']
-        
+
         # cheby_kan神经网络
         # ===================================================================================================================
         train_loader, test_loader, pinn_loader, input_size, scaler_params = load_data(
-            s_model_name=s_model_name, 
-            batch_size=batch_size, 
-            num_workers=num_workers, 
+            s_model_name=s_model_name,
+            batch_size=batch_size,
+            num_workers=num_workers,
             device=device
         )
         model = Cheby_KAN(input_size, output_size, middle_dim_kan, degrees, num_layers_KAN, dropout_p)
         loss_kan, kan_name = train_test(
-            model, train_loader, test_loader, num_epochs, lr_KAN, weight_decay, 
+            model, train_loader, test_loader, num_epochs, lr_KAN, weight_decay,
             device=device, net_name='PCKAN', pinn_params=pinn_loader, save_dir=s_model_name,
             beta_pde=1.0, bvp1_weight=1.0, bvp2_weight=1.0,
             maturity_feature=(0, 1), spot_feature=(2, 2), seq_all_steps=True,
@@ -469,4 +307,3 @@ if __name__ == '__main__':
         #     "test_label": test_label}
         # model(dataset['train_input'])
         # model.fit(dataset, opt="LBFGS", steps=200, lamb=0.001)
-        # ===================================================================================================================

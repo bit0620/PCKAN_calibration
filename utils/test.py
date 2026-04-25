@@ -3,7 +3,9 @@ import sys
 import os
 # 直接硬编码你的项目根目录路径
 # 请根据实际情况修改下面的路径字符串
-project_root = r"d:\Desktop\肖海阳大论文代码\大论文代码\第五章\PCKAN_calibration"
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 
 if project_root not in sys.path:
     sys.path.append(project_root)
@@ -137,7 +139,7 @@ def draw_real_model_prices(real_prices, model_prices, min_error_index, s_model_n
     plt.tight_layout()
     plt.savefig(f'{s_model_name}_{n_model_name}_price.png', dpi=300)
 
-def caculator_prices(option_params, real_prices_test, model_params, s_model_name, n_model_name, p_scaler):
+def caculator_prices(option_params, real_prices_test, model_params, s_model_name, n_model_name, p_scaler, y_scaler=None):
     option_params = torch.tensor(option_params, dtype=torch.float32).to(device)
     model_params = torch.tensor(model_params, dtype=torch.float32).to(device)
     model_prices = torch.zeros((len(model_params), 1))
@@ -145,7 +147,7 @@ def caculator_prices(option_params, real_prices_test, model_params, s_model_name
     model_name = [
         'PCKAN0.00032055925112217665.pt', # FVSJ PCKAN模型是
         'ANN0.0005864567356184125.pt', # FVSJ ANN模型是
-        'model_recovered_20260409_040524.pt', # Heston PCKAN模型
+        'PCKAN0.09347525984048843.pt', # Heston PCKAN模型
         'ANN0.0005252713453955948.pt' # Heston ANN模型
     ]
 
@@ -169,7 +171,7 @@ def caculator_prices(option_params, real_prices_test, model_params, s_model_name
     with torch.no_grad():
         model_prices = model(input_x).cpu()
 
-    # 统一处理反归一化，使用模型原始预测结果进行评估
+
     model_prices = p_scaler.inverse_transform(model_prices)
 
     # 保存
